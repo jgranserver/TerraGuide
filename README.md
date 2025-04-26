@@ -1,5 +1,8 @@
 # TerraGuide
 
+> [!NOTE]
+> Si Hablas Español porfa visita [README_ES.md](./README_ES.md)
+
 A helpful plugin for Terraria servers running TShock that provides in-game access to crafting recipes and wiki information.
 
 ## Features
