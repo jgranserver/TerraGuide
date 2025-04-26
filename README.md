@@ -1,5 +1,8 @@
 # TerraGuide
 
+> [!NOTE]
+> Si Hablas Español porfa visita [README_ES.md](./README_ES.md)
+
 A helpful plugin for Terraria servers running TShock that provides in-game access to crafting recipes and wiki information.
 
 ## Features
@@ -59,5 +62,8 @@ jgranserver
 
 ## Credits
 
-- TShock Team for the amazing server mod
-- Terraria Wiki contributors for recipe and item information
+- TShock Team for the amazing server mod.
+- Terraria Wiki contributors for recipe and item information.
+- [FrankV22](github.com/itsFrankV22) For Spanish support.
+
+**README** `v1`
