@@ -62,7 +62,8 @@ jgranserver
 
 ## Credits
 
-- TShock Team for the amazing server mod
-- Terraria Wiki contributors for recipe and item information
+- TShock Team for the amazing server mod.
+- Terraria Wiki contributors for recipe and item information.
+- [FrankV22](github.com/itsFrankV22) For Spanish support.
 
 **README** `v1`
