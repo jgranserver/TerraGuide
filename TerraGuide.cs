@@ -18,7 +18,7 @@ namespace TerraGuide
         public override string Author => "jgranserver";
         public override string Description => "A helpful guide plugin for Terraria servers";
         public override string Name => "TerraGuide";
-        public override Version Version => new Version(1, 0, 0);
+        public override Version Version => new Version(1, 1);
 
         private readonly HttpClient _httpClient;
         private const string WikiBaseUrl = "https://terraria.wiki.gg/wiki/";
