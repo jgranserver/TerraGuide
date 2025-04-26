@@ -64,3 +64,5 @@ jgranserver
 
 - TShock Team for the amazing server mod
 - Terraria Wiki contributors for recipe and item information
+
+**README** `v1`
