@@ -229,9 +229,7 @@ namespace TerraGuide
             }
 
             args.Player.SendInfoMessage(
-                TextHelper.ColorHeader(
-                    $"⚒ Crafting information for {TextHelper.ColorRecipeName(bestMatch.item.Name)} ⚒"
-                )
+                $"Crafting information for {TextHelper.ColorRecipeName(bestMatch.item.Name)}:"
             );
 
             foreach (var recipe in recipes)
@@ -244,22 +242,18 @@ namespace TerraGuide
                         .Select(t => TextHelper.ColorStation(TileID.Search.GetName(t)))
                         .ToList();
                     args.Player.SendInfoMessage(
-                        $"🔨 Crafting Station: {string.Join(" or ", stations)}"
+                        $"Crafting Station: {string.Join(" or ", stations)}"
                     );
                 }
 
                 // Show ingredients
-                args.Player.SendInfoMessage(TextHelper.ColorHeader("📦 Required Items:"));
+                args.Player.SendInfoMessage("Required Items:");
                 for (int i = 0; i < recipe.requiredItem.Length; i++)
                 {
                     if (recipe.requiredItem[i].type > 0)
                     {
                         args.Player.SendInfoMessage(
-                            TextHelper.MakeListItem(
-                                TextHelper.ColorItem(
-                                    $"{recipe.requiredItem[i].stack}x {recipe.requiredItem[i].Name}"
-                                )
-                            )
+                            $"• {recipe.requiredItem[i].stack}x {TextHelper.ColorItem(recipe.requiredItem[i].Name)}"
                         );
                     }
                 }
@@ -269,29 +263,25 @@ namespace TerraGuide
 
                 // Liquid requirements
                 if (recipe.needWater)
-                    conditions.Add("💧 Must be near Water");
+                    conditions.Add("Must be near Water");
                 if (recipe.needLava)
-                    conditions.Add("🔥 Must be near Lava");
+                    conditions.Add("Must be near Lava");
                 if (recipe.needHoney)
-                    conditions.Add("🍯 Must be near Honey");
+                    conditions.Add("Must be near Honey");
 
                 // Special locations
                 if (recipe.needSnowBiome)
-                    conditions.Add("❄️ Must be in Snow biome");
+                    conditions.Add("Must be in Snow biome");
                 if (recipe.needGraveyardBiome)
-                    conditions.Add("⚰️ Must be in Graveyard biome");
+                    conditions.Add("Must be in Graveyard biome");
 
                 // Display conditions if any exist
                 if (conditions.Count > 0)
                 {
-                    args.Player.SendInfoMessage(
-                        TextHelper.ColorHeader("\n⚠️ Special Requirements:")
-                    );
+                    args.Player.SendInfoMessage("\nSpecial Requirements:");
                     foreach (var condition in conditions)
                     {
-                        args.Player.SendInfoMessage(
-                            TextHelper.MakeListItem(TextHelper.ColorRequirement(condition))
-                        );
+                        args.Player.SendInfoMessage($"• {condition}");
                     }
                 }
             }
