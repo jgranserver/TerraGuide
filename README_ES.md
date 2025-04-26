@@ -1,6 +1,6 @@
 # TerraGuide
 
-> TRADUCCION AL ESPAÑOL POR [FrankV22](github.com/itsFrankV22)
+> Traduccion al Español por [FrankV22](github.com/itsFrankV22)
 
 Un plugin útil para servidores de Terraria que ejecutan TShock, el cual proporciona acceso dentro del juego a recetas de fabricación e información de la wiki.
 
@@ -61,5 +61,8 @@ jgranserver
 
 ## Créditos
 
-- Equipo de TShock por el increíble mod de servidor
-- Colaboradores de la Wiki de Terraria por la información de recetas y objetos
+- Equipo de TShock por el increíble mod de servidor.
+- Colaboradores de la Wiki de Terraria por la información de recetas y objetos.
+- [FrankV22](github.com/itsFrankV22) por soporte a español.
+
+**README** `v1`
