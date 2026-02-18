@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Linq;
 using System.Net.Http;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
 using HtmlAgilityPack;
@@ -18,11 +20,38 @@ namespace TerraGuide
         public override string Author => "jgranserver";
         public override string Description => "A helpful guide plugin for Terraria servers";
         public override string Name => "TerraGuide";
-        public override Version Version => new Version(1, 1);
+        public override Version Version => new Version(1, 3);
 
         private readonly HttpClient _httpClient;
         private const string WikiBaseUrl = "https://terraria.wiki.gg/wiki/";
         private const string WikiApiUrl = "https://terraria.wiki.gg/api.php";
+
+        // Class setup stage definitions: section index -> (display name, aliases)
+        private static readonly (int section, string name, string[] aliases)[] ClassStages = new[]
+        {
+            (1, "Pre-Bosses",            new[] { "pre-boss", "boss", "preboss", "pre-bosses" }),
+            (2, "Pre-Skeletron",         new[] { "skeletron", "pre-skeletron", "preskeletron" }),
+            (3, "Pre-Wall of Flesh",     new[] { "wof", "wall", "pre-wof", "pre-wall", "prewof" }),
+            (4, "Pre-mechanical bosses", new[] { "mech", "mechanical", "pre-mech", "premech" }),
+            (5, "Pre-Plantera",          new[] { "plantera", "pre-plantera", "preplantera" }),
+            (6, "Pre-Golem",             new[] { "golem", "pre-golem", "pregolem" }),
+            (7, "Pre-Lunatic Cultist",   new[] { "cultist", "lunatic", "pre-cultist", "precultist" }),
+            (8, "Pre-Moon Lord",         new[] { "moon", "moonlord", "pre-moon", "premoon" }),
+            (9, "Endgame",              new[] { "endgame", "end", "final", "postgame" }),
+        };
+
+        // Class name aliases
+        private static readonly (string canonical, string[] aliases)[] ClassAliases = new[]
+        {
+            ("Melee",     new[] { "melee", "warrior" }),
+            ("Ranged",    new[] { "ranged", "ranger", "range" }),
+            ("Magic",     new[] { "magic", "mage", "mana", "wizard" }),
+            ("Summoning", new[] { "summoning", "summoner", "summon", "minion" }),
+            ("Mixed",     new[] { "mixed", "general", "all", "universal" }),
+        };
+
+        // Simple wikitext cache: section index -> wikitext content
+        private readonly Dictionary<int, string> _wikitextCache = new();
 
         public TerraGuide(Main game)
             : base(game)
@@ -30,7 +59,7 @@ namespace TerraGuide
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Add(
                 "User-Agent",
-                "TerraGuide/1.0 (TShock Plugin; terraria.wiki.gg/wiki/User:Jgranserver)"
+                "TerraGuide/1.2 (TShock Plugin; terraria.wiki.gg/wiki/User:Jgranserver)"
             );
         }
 
@@ -49,7 +78,16 @@ namespace TerraGuide
                     HelpText = "Shows crafting information for items. Usage: /recipe <item name>",
                 }
             );
+
+            Commands.ChatCommands.Add(
+                new Command("terraguide.use", ClassCommand, "class")
+                {
+                    HelpText = "Shows class setup recommendations. Usage: /class <class> <stage>",
+                }
+            );
         }
+
+        #region Wiki Command
 
         private async void WikiCommand(CommandArgs args)
         {
@@ -60,97 +98,198 @@ namespace TerraGuide
             }
 
             string searchTerm = string.Join(" ", args.Parameters);
-            string searchUrl =
-                $"{WikiApiUrl}?action=opensearch&format=json&search={HttpUtility.UrlEncode(searchTerm)}&limit=1&namespace=0&profile=fuzzy";
 
             try
             {
                 args.Player.SendInfoMessage($"Searching wiki for: {searchTerm}...");
-                TShock.Log.Info($"Accessing search API URL: {searchUrl}");
 
-                var searchRequest = new HttpRequestMessage(HttpMethod.Get, searchUrl);
-                searchRequest.Headers.Add("Accept", "application/json");
-
-                using (var searchResponse = await _httpClient.SendAsync(searchRequest))
+                // Step 1: Search for the page title using opensearch
+                string pageTitle = await SearchWikiTitle(searchTerm);
+                if (pageTitle == null)
                 {
-                    searchResponse.EnsureSuccessStatusCode();
-                    var searchJson = await searchResponse.Content.ReadAsStringAsync();
-                    TShock.Log.Info($"Search API response: {searchJson}");
-
-                    dynamic searchResult = Newtonsoft.Json.JsonConvert.DeserializeObject(
-                        searchJson
-                    );
-
-                    if (searchResult[1].Count > 0)
-                    {
-                        string exactTitle = searchResult[1][0].ToString();
-                        // Use the correct API parameters for content
-                        string contentUrl =
-                            $"{WikiApiUrl}?action=query&format=json&prop=revisions&rvprop=content&rvslots=main&titles={HttpUtility.UrlEncode(exactTitle)}";
-
-                        TShock.Log.Info($"Fetching content from: {contentUrl}");
-
-                        var contentRequest = new HttpRequestMessage(HttpMethod.Get, contentUrl);
-                        contentRequest.Headers.Add("Accept", "application/json");
-
-                        using (var contentResponse = await _httpClient.SendAsync(contentRequest))
-                        {
-                            contentResponse.EnsureSuccessStatusCode();
-                            var contentJson = await contentResponse.Content.ReadAsStringAsync();
-                            TShock.Log.Info($"Content API response: {contentJson}");
-
-                            dynamic result = Newtonsoft.Json.JsonConvert.DeserializeObject(
-                                contentJson
-                            );
-                            var pages = result.query?.pages;
-
-                            if (pages != null)
-                            {
-                                var firstPageId = ((Newtonsoft.Json.Linq.JObject)pages)
-                                    .Properties()
-                                    .First()
-                                    .Name;
-                                var firstPage = pages[firstPageId];
-
-                                if (firstPage.revisions != null && firstPage.revisions.Count > 0)
-                                {
-                                    string wikiText = firstPage
-                                        .revisions[0]
-                                        .slots.main["*"]
-                                        .ToString();
-                                    wikiText = CleanWikiText(wikiText);
-
-                                    if (!string.IsNullOrWhiteSpace(wikiText))
-                                    {
-                                        // Split the text into chunks of reasonable size to avoid chat overflow
-                                        const int chunkSize = 500;
-                                        var chunks = SplitTextIntoChunks(wikiText, chunkSize);
-
-                                        foreach (var chunk in chunks)
-                                        {
-                                            args.Player.SendInfoMessage(chunk);
-                                        }
-
-                                        args.Player.SendInfoMessage(
-                                            $"Read more: {WikiBaseUrl}{HttpUtility.UrlEncode(exactTitle)}"
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
                     args.Player.SendErrorMessage(
-                        $"No information found for '{searchTerm}'. Try using the exact item name (e.g., 'Dirt Block' instead of 'dirt')."
+                        $"No wiki page found for '{searchTerm}'. Try the exact item name (e.g., 'Dirt Block')."
                     );
+                    return;
                 }
+
+                // Step 2: Fetch the rendered HTML of the intro section via the parse API
+                string introHtml = await FetchParsedSection(pageTitle, section: 0);
+                if (introHtml == null)
+                {
+                    args.Player.SendErrorMessage($"Could not load wiki page for '{pageTitle}'.");
+                    return;
+                }
+
+                // Step 3: Extract clean text from the HTML using HtmlAgilityPack
+                string cleanText = ExtractCleanText(introHtml);
+
+                if (string.IsNullOrWhiteSpace(cleanText))
+                {
+                    args.Player.SendErrorMessage(
+                        $"No readable content found for '{pageTitle}'."
+                    );
+                    return;
+                }
+
+                // Step 4: Display to the player
+                args.Player.SendInfoMessage($"--- {TextHelper.ColorHeader(pageTitle)} ---");
+
+                // Split into sentences and limit output
+                var chunks = SplitTextIntoSentenceChunks(cleanText, maxChars: 450);
+                foreach (var chunk in chunks)
+                {
+                    args.Player.SendInfoMessage(chunk);
+                }
+
+                string wikiUrl = $"{WikiBaseUrl}{Uri.EscapeDataString(pageTitle.Replace(' ', '_'))}";
+                args.Player.SendInfoMessage($"Read more: {wikiUrl}");
             }
             catch (Exception ex)
             {
                 args.Player.SendErrorMessage($"Error accessing wiki: {ex.Message}");
-                TShock.Log.Error($"TerraGuide wiki error for term '{searchTerm}': {ex}");
+                TShock.Log.Error($"TerraGuide wiki error for '{searchTerm}': {ex}");
             }
         }
+
+        /// <summary>
+        /// Uses the MediaWiki opensearch API to find the best matching page title.
+        /// </summary>
+        private async Task<string?> SearchWikiTitle(string searchTerm)
+        {
+            string searchUrl =
+                $"{WikiApiUrl}?action=opensearch&format=json&search={HttpUtility.UrlEncode(searchTerm)}&limit=1&namespace=0&profile=fuzzy";
+
+            var request = new HttpRequestMessage(HttpMethod.Get, searchUrl);
+            request.Headers.Add("Accept", "application/json");
+
+            using var response = await _httpClient.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync();
+            dynamic result = Newtonsoft.Json.JsonConvert.DeserializeObject(json);
+
+            if (result[1] != null && result[1].Count > 0)
+            {
+                return result[1][0].ToString();
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Fetches the rendered HTML of a specific section of a wiki page using the parse API.
+        /// Section 0 = intro (everything before the first heading).
+        /// </summary>
+        private async Task<string?> FetchParsedSection(string pageTitle, int section)
+        {
+            string url =
+                $"{WikiApiUrl}?action=parse&format=json&page={HttpUtility.UrlEncode(pageTitle)}&prop=text&section={section}&formatversion=2&disabletoc=true";
+
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("Accept", "application/json");
+
+            using var response = await _httpClient.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync();
+            dynamic result = Newtonsoft.Json.JsonConvert.DeserializeObject(json);
+
+            return result?.parse?.text?.ToString();
+        }
+
+        /// <summary>
+        /// Extracts clean, readable plaintext from rendered wiki HTML using HtmlAgilityPack.
+        /// Removes infoboxes, tables, images, navboxes, and other non-content elements.
+        /// </summary>
+        private string ExtractCleanText(string html)
+        {
+            var doc = new HtmlDocument();
+            doc.LoadHtml(html);
+
+            // Remove elements that are not useful for in-game display
+            RemoveNodes(doc, "//table");                              // Infobox, stat tables
+            RemoveNodes(doc, "//div[contains(@class,'mw-parser-output')]//div[contains(@class,'notaninfobox')]");
+            RemoveNodes(doc, "//div[contains(@class,'infobox')]");
+            RemoveNodes(doc, "//div[contains(@class,'navbox')]");
+            RemoveNodes(doc, "//div[contains(@class,'toc')]");        // Table of contents
+            RemoveNodes(doc, "//figure");                             // Images with captions
+            RemoveNodes(doc, "//img");                                // Standalone images
+            RemoveNodes(doc, "//sup[contains(@class,'reference')]");  // Citation refs [1]
+            RemoveNodes(doc, "//span[contains(@class,'mw-editsection')]"); // [edit] links
+            RemoveNodes(doc, "//style");
+            RemoveNodes(doc, "//script");
+            RemoveNodes(doc, "//div[contains(@class,'hatnote')]");    // "For other uses" notes
+            RemoveNodes(doc, "//div[contains(@class,'quote')]");      // NPC quotes
+            RemoveNodes(doc, "//blockquote");
+
+            // Get the inner text
+            string text = doc.DocumentNode.InnerText;
+
+            // Decode HTML entities
+            text = HttpUtility.HtmlDecode(text);
+
+            // Normalize whitespace
+            text = Regex.Replace(text, @"\r\n?|\n", " ");
+            text = Regex.Replace(text, @"\s{2,}", " ");
+            text = Regex.Replace(text, @"\[\d+\]", ""); // Remove leftover citation numbers
+
+            return text.Trim();
+        }
+
+        /// <summary>
+        /// Helper to remove all nodes matching an XPath query from an HtmlDocument.
+        /// </summary>
+        private void RemoveNodes(HtmlDocument doc, string xpath)
+        {
+            var nodes = doc.DocumentNode.SelectNodes(xpath);
+            if (nodes != null)
+            {
+                foreach (var node in nodes.ToList())
+                {
+                    node.Remove();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Splits text into chunks at sentence boundaries, respecting a max character limit.
+        /// </summary>
+        private List<string> SplitTextIntoSentenceChunks(string text, int maxChars)
+        {
+            var chunks = new List<string>();
+            if (string.IsNullOrWhiteSpace(text))
+                return chunks;
+
+            // Split by sentence-ending punctuation
+            var sentences = Regex.Split(text, @"(?<=\.)\s+");
+            var current = new StringBuilder();
+
+            foreach (var sentence in sentences)
+            {
+                if (current.Length + sentence.Length + 1 > maxChars && current.Length > 0)
+                {
+                    chunks.Add(current.ToString().Trim());
+                    current.Clear();
+                }
+                if (current.Length > 0)
+                    current.Append(' ');
+                current.Append(sentence);
+            }
+
+            if (current.Length > 0)
+                chunks.Add(current.ToString().Trim());
+
+            // Limit to 3 chunks to avoid chat spam
+            if (chunks.Count > 3)
+                chunks = chunks.Take(3).ToList();
+
+            return chunks;
+        }
+
+        #endregion
+
+        #region Recipe Command
 
         private void RecipeCommand(CommandArgs args)
         {
@@ -161,347 +300,619 @@ namespace TerraGuide
             }
 
             string searchTerm = string.Join(" ", args.Parameters);
-            var matchingItems = new List<(Item item, float score)>();
 
-            // Create regex pattern from search term
-            var searchPattern = string.Join(
-                ".*?",
-                searchTerm
-                    .Split(' ')
-                    .Select(term => System.Text.RegularExpressions.Regex.Escape(term))
-            );
-            var regex = new System.Text.RegularExpressions.Regex(
-                searchPattern,
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase
-            );
-
-            // Search through all items
-            for (int i = 0; i < ItemID.Count; i++)
-            {
-                Item item = new Item();
-                item.SetDefaults(i);
-
-                if (string.IsNullOrEmpty(item.Name))
-                    continue;
-
-                // Try exact match first
-                if (item.Name.Equals(searchTerm, StringComparison.OrdinalIgnoreCase))
-                {
-                    matchingItems.Clear();
-                    matchingItems.Add((item, 1.0f));
-                    break;
-                }
-
-                // Check for regex match
-                var match = regex.Match(item.Name);
-                if (match.Success)
-                {
-                    // Calculate match quality (0-1)
-                    float score =
-                        (float)match.Length / Math.Max(item.Name.Length, searchTerm.Length);
-                    matchingItems.Add((item, score));
-                }
-                // Fallback to contains for partial matches
-                else if (item.Name.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
-                {
-                    matchingItems.Add((item, 0.5f));
-                }
-            }
-
-            if (matchingItems.Count == 0)
-            {
-                args.Player.SendErrorMessage($"No items found matching '{searchTerm}'.");
-                return;
-            }
-
-            // Sort by match quality and get best match
-            var bestMatch = matchingItems.OrderByDescending(x => x.score).First();
-            var recipes = Main
-                .recipe.Where(r => r != null && r.createItem.type == bestMatch.item.type)
-                .ToList();
-
-            if (recipes.Count == 0)
-            {
-                args.Player.SendErrorMessage(
-                    $"No crafting recipe found for {bestMatch.item.Name}."
-                );
-                return;
-            }
-
-            args.Player.SendInfoMessage(
-                $"Crafting information for {TextHelper.ColorRecipeName(bestMatch.item.Name)}:"
-            );
-
-            foreach (var recipe in recipes)
-            {
-                // Show crafting station
-                if (recipe.requiredTile != null && recipe.requiredTile.Length > 0)
-                {
-                    var stations = recipe
-                        .requiredTile.Where(t => t >= 0)
-                        .Select(t => TextHelper.ColorStation(TileID.Search.GetName(t)))
-                        .ToList();
-                    args.Player.SendInfoMessage(
-                        $"Crafting Station: {string.Join(" or ", stations)}"
-                    );
-                }
-
-                // Show ingredients
-                args.Player.SendInfoMessage("Required Items:");
-                for (int i = 0; i < recipe.requiredItem.Length; i++)
-                {
-                    if (recipe.requiredItem[i].type > 0)
-                    {
-                        args.Player.SendInfoMessage(
-                            $"• {recipe.requiredItem[i].stack}x {TextHelper.ColorItem(recipe.requiredItem[i].Name)}"
-                        );
-                    }
-                }
-
-                // Check special conditions
-                var conditions = new List<string>();
-
-                // Liquid requirements
-                if (recipe.needWater)
-                    conditions.Add("Must be near Water");
-                if (recipe.needLava)
-                    conditions.Add("Must be near Lava");
-                if (recipe.needHoney)
-                    conditions.Add("Must be near Honey");
-
-                // Special locations
-                if (recipe.needSnowBiome)
-                    conditions.Add("Must be in Snow biome");
-                if (recipe.needGraveyardBiome)
-                    conditions.Add("Must be in Graveyard biome");
-
-                // Display conditions if any exist
-                if (conditions.Count > 0)
-                {
-                    args.Player.SendInfoMessage("\nSpecial Requirements:");
-                    foreach (var condition in conditions)
-                    {
-                        args.Player.SendInfoMessage($"• {condition}");
-                    }
-                }
-            }
-        }
-
-        private string CleanWikiText(string wikiText)
-        {
             try
             {
-                // Debug the input
-                TShock.Log.Info(
-                    $"Processing wiki text: {wikiText.Substring(0, Math.Min(200, wikiText.Length))}..."
-                );
+                var bestMatch = FindBestItemMatch(searchTerm);
 
-                // Remove item infobox
-                wikiText = System.Text.RegularExpressions.Regex.Replace(
-                    wikiText,
-                    @"\{\{item infobox[\s\S]*?\}\}",
-                    ""
-                );
+                if (bestMatch == null)
+                {
+                    args.Player.SendErrorMessage($"No items found matching '{searchTerm}'.");
+                    return;
+                }
 
-                // Remove other templates
-                wikiText = System.Text.RegularExpressions.Regex.Replace(
-                    wikiText,
-                    @"\{\{[^}]*\}\}",
-                    ""
-                );
+                var recipes = FindRecipesForItem(bestMatch.type);
 
-                // Remove file references and images with their captions
-                wikiText = System.Text.RegularExpressions.Regex.Replace(
-                    wikiText,
-                    @"\[\[File:[^\]]*\]\].*?\n",
-                    ""
-                );
-
-                // Convert wiki links to plain text (keep the readable part)
-                wikiText = System.Text.RegularExpressions.Regex.Replace(
-                    wikiText,
-                    @"\[\[([^|\]]*?)\]\]",
-                    "$1"
-                );
-                wikiText = System.Text.RegularExpressions.Regex.Replace(
-                    wikiText,
-                    @"\[\[(?:[^|\]]*\|)?([^\]]+)\]\]",
-                    "$1"
-                );
-
-                // Split into paragraphs
-                var paragraphs = wikiText
-                    .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(p => p.Trim())
-                    .Where(p =>
-                        !string.IsNullOrWhiteSpace(p)
-                        && !p.StartsWith("*")
-                        && !p.StartsWith("|")
-                        && !p.StartsWith("{{")
-                        && !p.StartsWith("}}")
-                        && !p.StartsWith("==")
-                        && !p.StartsWith(":")
-                        && p.Length > 20 // Minimum length for meaningful content
+                if (recipes.Count == 0)
+                {
+                    args.Player.SendErrorMessage(
+                        $"No crafting recipe found for {bestMatch.Name}."
                     );
+                    return;
+                }
 
-                // Get the first meaningful paragraph
-                var description = paragraphs.FirstOrDefault() ?? "No description available.";
+                string resultName = TextHelper.ColorRecipeName(bestMatch.Name);
+                args.Player.SendInfoMessage($"--- Crafting: {resultName} ---");
 
-                // Clean up remaining markup and whitespace
-                description = System.Text.RegularExpressions.Regex.Replace(
-                    description,
-                    @"'{2,}",
-                    ""
-                );
-                description = System.Text.RegularExpressions.Regex.Replace(
-                    description,
-                    @"\s+",
-                    " "
-                );
-                description = HttpUtility.HtmlDecode(description).Trim();
+                for (int r = 0; r < recipes.Count; r++)
+                {
+                    var recipe = recipes[r];
+                    if (recipes.Count > 1)
+                        args.Player.SendInfoMessage($"Recipe {r + 1}/{recipes.Count}:");
 
-                // Debug the output
-                TShock.Log.Info($"Cleaned description: {description}");
+                    // Show result amount if > 1
+                    var createItem = GetCreateItem(recipe);
+                    if (createItem != null && createItem.stack > 1)
+                    {
+                        args.Player.SendInfoMessage(
+                            $"Creates: {createItem.stack}x {bestMatch.Name}"
+                        );
+                    }
 
-                return description;
+                    // Show crafting station(s)
+                    DisplayCraftingStations(args.Player, recipe);
+
+                    // Show ingredients
+                    DisplayIngredients(args.Player, recipe);
+
+                    // Show special conditions
+                    DisplayConditions(args.Player, recipe);
+                }
             }
             catch (Exception ex)
             {
-                TShock.Log.Error($"Error cleaning wiki text: {ex}");
-                return "Error processing wiki content.";
+                args.Player.SendErrorMessage($"Error looking up recipe: {ex.Message}");
+                TShock.Log.Error($"TerraGuide recipe error for '{searchTerm}': {ex}");
             }
         }
 
-        private IEnumerable<string> SplitTextIntoChunks(string text, int chunkSize)
+        /// <summary>
+        /// Finds the best matching Item by name using TShock's built-in item lookup.
+        /// </summary>
+        private Item? FindBestItemMatch(string searchTerm)
         {
-            for (int i = 0; i < text.Length; i += chunkSize)
-            {
-                if (i + chunkSize <= text.Length)
-                {
-                    yield return text.Substring(i, chunkSize);
-                }
-                else
-                {
-                    yield return text.Substring(i);
-                }
-            }
+            var items = TShock.Utils.GetItemByIdOrName(searchTerm);
+            if (items == null || items.Count == 0)
+                return null;
+
+            // If there's an exact match or a single result, use the first
+            return items[0];
         }
 
-        private string ExtractCraftingInfo(string wikiText)
+        /// <summary>
+        /// Finds all recipes that produce the given item type.
+        /// Uses reflection to access createItem safely.
+        /// </summary>
+        private List<Recipe> FindRecipesForItem(int itemType)
+        {
+            var results = new List<Recipe>();
+            for (int i = 0; i < Recipe.numRecipes; i++)
+            {
+                var recipe = Main.recipe[i];
+                if (recipe == null) continue;
+
+                try
+                {
+                    var createItem = GetFieldOrProp<Item>(recipe, "createItem");
+                    if (createItem != null && createItem.type == itemType)
+                        results.Add(recipe);
+                }
+                catch { }
+            }
+            return results;
+        }
+
+        /// <summary>
+        /// Gets the createItem from a recipe, or null if not accessible.
+        /// </summary>
+        private Item? GetCreateItem(Recipe recipe)
+        {
+            return GetFieldOrProp<Item>(recipe, "createItem");
+        }
+
+        /// <summary>
+        /// Displays the crafting station(s) required for a recipe.
+        /// Uses reflection to handle both array and List types for requiredTile.
+        /// </summary>
+        private void DisplayCraftingStations(TSPlayer player, Recipe recipe)
         {
             try
             {
-                TShock.Log.Info("Starting to extract crafting info...");
+                var stations = new List<string>();
 
-                // First find the Recipes section specifically
-                var recipesMatch = System.Text.RegularExpressions.Regex.Match(
-                    wikiText,
-                    @"===\s*Recipes\s*===\s*(.*?)(?===|\z)",
-                    System.Text.RegularExpressions.RegexOptions.Singleline
-                );
+                // Try to get requiredTile via reflection (could be int[] or List<int>)
+                var tileData = GetFieldOrPropRaw(recipe, "requiredTile");
+                if (tileData == null) return;
 
-                if (!recipesMatch.Success)
+                // Handle both int[] and List<int>
+                if (tileData is System.Collections.IList tileList)
                 {
-                    TShock.Log.Info("No Recipes section found.");
-                    return "No recipe information found.";
+                    foreach (var tile in tileList)
+                    {
+                        if (tile is int tileId)
+                        {
+                            if (tileId < 0) break;
+
+                            string tileName;
+                            try
+                            {
+                                // Try TileID.Search.GetName via reflection
+                                var searchType = typeof(Terraria.ID.TileID).GetField("Search")?.GetValue(null);
+                                var getNameMethod = searchType?.GetType().GetMethod("GetName");
+                                tileName = getNameMethod?.Invoke(searchType, new object[] { tileId })?.ToString() ?? $"Tile #{tileId}";
+                            }
+                            catch
+                            {
+                                tileName = $"Tile #{tileId}";
+                            }
+
+                            stations.Add(TextHelper.ColorStation(tileName));
+                        }
+                    }
                 }
 
-                string recipesSection = recipesMatch.Groups[1].Value.Trim();
-                TShock.Log.Info($"Found Recipes section: {recipesSection}");
-                var craftingInfo = new System.Text.StringBuilder();
+                if (stations.Count > 0)
+                    player.SendInfoMessage($"Station: {string.Join(" + ", stations)}");
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.Warn($"TerraGuide: Error reading crafting stations: {ex.Message}");
+            }
+        }
 
-                // Look for recipe template with all parameters
-                var recipeMatch = System.Text.RegularExpressions.Regex.Match(
-                    recipesSection,
-                    @"\{\{recipes\|([^}]+)\}\}",
-                    System.Text.RegularExpressions.RegexOptions.Singleline
-                );
+        /// <summary>
+        /// Displays the ingredients required for a recipe.
+        /// Uses reflection to handle both array and List types for requiredItem.
+        /// </summary>
+        private void DisplayIngredients(TSPlayer player, Recipe recipe)
+        {
+            try
+            {
+                var itemData = GetFieldOrPropRaw(recipe, "requiredItem");
+                if (itemData == null) return;
 
-                if (recipeMatch.Success)
+                var ingredientLines = new List<string>();
+
+                if (itemData is System.Collections.IList itemList)
                 {
-                    string recipeParams = recipeMatch.Groups[1].Value;
-                    TShock.Log.Info($"Found recipe parameters: {recipeParams}");
-
-                    // Parse recipe parameters
-                    var parameters = recipeParams
-                        .Split('|')
-                        .Select(p => p.Trim())
-                        .Where(p => !string.IsNullOrWhiteSpace(p))
-                        .ToList();
-
-                    foreach (var param in parameters)
+                    foreach (var obj in itemList)
                     {
-                        TShock.Log.Info($"Processing parameter: {param}");
-
-                        if (param.StartsWith("station="))
+                        if (obj is Item reqItem)
                         {
-                            var station = param.Substring("station=".Length).Trim();
-                            station = CleanWikiLinks(station);
-                            craftingInfo.AppendLine($"Crafting Station: {station}");
+                            if (reqItem.type <= 0) break;
+                            ingredientLines.Add($"  • {reqItem.stack}x {TextHelper.ColorItem(reqItem.Name)}");
                         }
-                        else if (param.StartsWith("i") && char.IsDigit(param[1]))
-                        {
-                            // Find matching amount parameter
-                            var itemMatch = System.Text.RegularExpressions.Regex.Match(
-                                param,
-                                @"i(\d+)\s*=\s*(.+)"
-                            );
-                            if (itemMatch.Success)
-                            {
-                                string index = itemMatch.Groups[1].Value;
-                                string item = CleanWikiLinks(itemMatch.Groups[2].Value);
+                    }
+                }
 
-                                // Look for corresponding amount
-                                var amountParam = parameters.FirstOrDefault(p =>
-                                    p.StartsWith($"a{index}=")
-                                );
-                                if (amountParam != null)
-                                {
-                                    var amount = amountParam.Substring($"a{index}=".Length).Trim();
-                                    if (!craftingInfo.ToString().Contains("Required Items:"))
-                                    {
-                                        craftingInfo.AppendLine("\nRequired Items:");
-                                    }
-                                    craftingInfo.AppendLine($"• {amount}x {item}");
-                                    TShock.Log.Info($"Added ingredient: {amount}x {item}");
-                                }
+                if (ingredientLines.Count > 0)
+                {
+                    player.SendInfoMessage("Ingredients:");
+                    foreach (var line in ingredientLines)
+                        player.SendInfoMessage(line);
+                }
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.Warn($"TerraGuide: Error reading ingredients: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Displays special conditions required for a recipe.
+        /// All access uses reflection for maximum compatibility.
+        /// </summary>
+        private void DisplayConditions(TSPlayer player, Recipe recipe)
+        {
+            try
+            {
+                var conditions = new List<string>();
+
+                // Check boolean condition fields via reflection
+                var booleanConditions = new Dictionary<string, string>
+                {
+                    { "needWater", "Near Water" },
+                    { "needLava", "Near Lava" },
+                    { "needHoney", "Near Honey" },
+                    { "needSnowBiome", "In Snow Biome" },
+                    { "needGraveyardBiome", "In Graveyard Biome" },
+                    { "needEverything", "Special Crafting" },
+                    { "needShimmer", "Near Shimmer" },
+                };
+
+                foreach (var kvp in booleanConditions)
+                {
+                    try
+                    {
+                        var val = GetFieldOrProp<bool?>(recipe, kvp.Key);
+                        if (val == true) conditions.Add(kvp.Value);
+                    }
+                    catch { }
+                }
+
+                // Modern Conditions list (some Terraria versions)
+                try
+                {
+                    var conditionsProp = recipe.GetType().GetProperty("Conditions");
+                    if (conditionsProp != null)
+                    {
+                        var condList = conditionsProp.GetValue(recipe) as System.Collections.IList;
+                        if (condList != null)
+                        {
+                            foreach (var cond in condList)
+                            {
+                                var descProp = cond?.GetType().GetProperty("Description");
+                                string? desc = descProp?.GetValue(cond)?.ToString();
+                                if (!string.IsNullOrWhiteSpace(desc) && !conditions.Contains(desc))
+                                    conditions.Add(desc);
                             }
                         }
                     }
                 }
+                catch { }
 
-                // Add crafting tree note if present
-                if (wikiText.Contains("=== Crafting tree ==="))
+                // Alchemy table bonus
+                try
                 {
-                    craftingInfo.AppendLine(
-                        "\nThis item has a complex crafting tree. Check the wiki for the complete recipe tree."
-                    );
+                    var val = GetFieldOrProp<bool?>(recipe, "alchemy");
+                    if (val == true)
+                        conditions.Add("Benefits from Alchemy Table (33% chance to not consume ingredients)");
                 }
+                catch { }
 
-                string result = craftingInfo.ToString().Trim();
-                TShock.Log.Info($"Final crafting info: {result}");
-                return string.IsNullOrWhiteSpace(result)
-                    ? "No specific crafting information found."
-                    : result;
+                if (conditions.Count > 0)
+                {
+                    player.SendInfoMessage("Conditions:");
+                    foreach (var condition in conditions)
+                        player.SendInfoMessage($"  • {TextHelper.ColorRequirement(condition)}");
+                }
             }
             catch (Exception ex)
             {
-                TShock.Log.Error($"Error extracting crafting info: {ex}");
-                return "Error processing crafting information.";
+                TShock.Log.Warn($"TerraGuide: Error reading conditions: {ex.Message}");
             }
         }
 
-        // Helper method to clean wiki links
-        private string CleanWikiLinks(string text)
+        #region Reflection helpers
+
+        /// <summary>
+        /// Gets a field or property value from an object by name, using reflection.
+        /// Returns default(T) if not found.
+        /// </summary>
+        private T? GetFieldOrProp<T>(object obj, string name)
         {
-            // Convert [[Link|Display]] to Display
-            text = System.Text.RegularExpressions.Regex.Replace(
-                text,
-                @"\[\[(?:[^|\]]*\|)?([^\]]+)\]\]",
-                "$1"
-            );
-            return text.Trim();
+            var type = obj.GetType();
+            var field = type.GetField(name);
+            if (field != null) return (T?)field.GetValue(obj);
+
+            var prop = type.GetProperty(name);
+            if (prop != null) return (T?)prop.GetValue(obj);
+
+            return default;
         }
+
+        /// <summary>
+        /// Gets a field or property value as object (untyped) using reflection.
+        /// </summary>
+        private object? GetFieldOrPropRaw(object obj, string name)
+        {
+            var type = obj.GetType();
+            var field = type.GetField(name);
+            if (field != null) return field.GetValue(obj);
+
+            var prop = type.GetProperty(name);
+            if (prop != null) return prop.GetValue(obj);
+
+            return null;
+        }
+
+        #endregion
+
+        #endregion
+
+        #region Class Setups Command
+
+        private void ClassCommand(CommandArgs args)
+        {
+            if (args.Parameters.Count < 1 || args.Parameters[0].Equals("help", StringComparison.OrdinalIgnoreCase))
+            {
+                args.Player.SendMessage("━━━ [c/FFD700:/class Command Guide] ━━━", Microsoft.Xna.Framework.Color.White);
+                args.Player.SendInfoMessage("Usage: /class <class> <stage>");
+                args.Player.SendInfoMessage("");
+                args.Player.SendMessage("[c/FFA500:Classes:]", Microsoft.Xna.Framework.Color.White);
+                args.Player.SendInfoMessage("  Melee (warrior), Ranged (ranger), Magic (mage),");
+                args.Player.SendInfoMessage("  Summoning (summoner), Mixed (general)");
+                args.Player.SendInfoMessage("");
+                args.Player.SendMessage("[c/FFA500:Stages:]", Microsoft.Xna.Framework.Color.White);
+                args.Player.SendInfoMessage("  Pre-Bosses (boss), Pre-Skeletron, Pre-Wall of Flesh (wof),");
+                args.Player.SendInfoMessage("  Pre-mechanical bosses (mech), Pre-Plantera, Pre-Golem,");
+                args.Player.SendInfoMessage("  Pre-Lunatic Cultist (cultist), Pre-Moon Lord (moon), Endgame");
+                args.Player.SendInfoMessage("");
+                args.Player.SendMessage("[c/FFA500:Examples:]", Microsoft.Xna.Framework.Color.White);
+                args.Player.SendInfoMessage("  /class melee pre-boss");
+                args.Player.SendInfoMessage("  /class mage plantera");
+                args.Player.SendInfoMessage("  /class summoner endgame");
+                return;
+            }
+
+            // Parse class
+            string classInput = args.Parameters[0].ToLowerInvariant();
+            string? canonicalClass = null;
+            foreach (var (canonical, aliases) in ClassAliases)
+            {
+                if (aliases.Any(a => a == classInput || a.Contains(classInput) || classInput.Contains(a)))
+                {
+                    canonicalClass = canonical;
+                    break;
+                }
+            }
+
+            if (canonicalClass == null)
+            {
+                args.Player.SendErrorMessage($"Unknown class '{args.Parameters[0]}'. Available: {string.Join(", ", ClassAliases.Select(c => c.canonical))}");
+                return;
+            }
+
+            // Parse stage (if provided)
+            if (args.Parameters.Count < 2)
+            {
+                args.Player.SendInfoMessage($"Usage: /class {canonicalClass.ToLower()} <stage>");
+                args.Player.SendInfoMessage($"Stages: {string.Join(", ", ClassStages.Select(s => s.name))}");
+                return;
+            }
+
+            string stageInput = string.Join(" ", args.Parameters.Skip(1)).ToLowerInvariant();
+            (int section, string name, string[] aliases)? matchedStage = null;
+            foreach (var stage in ClassStages)
+            {
+                if (stage.aliases.Any(a => a == stageInput || a.Contains(stageInput) || stageInput.Contains(a)))
+                {
+                    matchedStage = stage;
+                    break;
+                }
+            }
+
+            if (matchedStage == null)
+            {
+                args.Player.SendErrorMessage($"Unknown stage '{stageInput}'. Available: {string.Join(", ", ClassStages.Select(s => s.name))}");
+                return;
+            }
+
+            // Fetch and display asynchronously
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await FetchAndDisplayClassSetup(args.Player, canonicalClass, matchedStage.Value);
+                }
+                catch (Exception ex)
+                {
+                    args.Player.SendErrorMessage($"Error fetching class setup: {ex.Message}");
+                    TShock.Log.Error($"TerraGuide class command error: {ex}");
+                }
+            });
+        }
+
+        private async Task FetchAndDisplayClassSetup(TSPlayer player, string className, (int section, string name, string[] aliases) stage)
+        {
+            // Try to get cached wikitext, otherwise fetch
+            string wikitext;
+            if (_wikitextCache.TryGetValue(stage.section, out var cached))
+            {
+                wikitext = cached;
+            }
+            else
+            {
+                string url = $"{WikiApiUrl}?action=parse&page=Guide:Class_setups&prop=wikitext&section={stage.section}&format=json";
+                var response = await _httpClient.GetStringAsync(url);
+
+                // Extract wikitext from JSON
+                var json = Newtonsoft.Json.Linq.JObject.Parse(response);
+                wikitext = json["parse"]?["wikitext"]?["*"]?.ToString() ?? "";
+
+                if (string.IsNullOrWhiteSpace(wikitext))
+                {
+                    player.SendErrorMessage("Could not fetch class setup data from the wiki.");
+                    return;
+                }
+
+                _wikitextCache[stage.section] = wikitext;
+            }
+
+            // Extract the class block from wikitext
+            var classBlock = ExtractClassBlock(wikitext, className);
+            if (string.IsNullOrWhiteSpace(classBlock))
+            {
+                player.SendErrorMessage($"No {className} setup found for {stage.name}.");
+                return;
+            }
+
+            // Parse categories and items from the class block
+            var categories = ParseClassCategories(classBlock);
+
+            if (categories.Count == 0)
+            {
+                player.SendErrorMessage($"No equipment data found for {className} in {stage.name}.");
+                return;
+            }
+
+            // Display header
+            player.SendMessage($"━━━ [c/FFD700:{className}] — [c/87CEEB:{stage.name}] ━━━", Microsoft.Xna.Framework.Color.White);
+
+            foreach (var (category, items) in categories)
+            {
+                if (items.Count == 0) continue;
+
+                // Category header with color
+                player.SendMessage($"  [c/FFA500:{category}]", Microsoft.Xna.Framework.Color.White);
+
+                // Items in compact format, max ~4 per line to fit chat width
+                var chunks = new List<string>();
+                var currentLine = new List<string>();
+                foreach (var item in items)
+                {
+                    currentLine.Add($"[c/AAFFAA:{item}]");
+                    if (currentLine.Count >= 4)
+                    {
+                        chunks.Add("    " + string.Join(", ", currentLine));
+                        currentLine.Clear();
+                    }
+                }
+                if (currentLine.Count > 0)
+                    chunks.Add("    " + string.Join(", ", currentLine));
+
+                foreach (var chunk in chunks)
+                    player.SendMessage(chunk, Microsoft.Xna.Framework.Color.White);
+            }
+
+            // Wiki link
+            player.SendInfoMessage($"Full guide: {WikiBaseUrl}Guide:Class_setups#{stage.name.Replace(" ", "_")}");
+        }
+
+        /// <summary>
+        /// Extracts the wikitext block for a specific class from a section's wikitext.
+        /// Looks for {{infocard/start|...|name=ClassName|...}} to {{infocard/end}}
+        /// </summary>
+        private string? ExtractClassBlock(string wikitext, string className)
+        {
+            // Find the infocard start for this class
+            var startPattern = new Regex(
+                @"\{\{infocard/start\|[^}]*name=" + Regex.Escape(className) + @"[^}]*\}\}",
+                RegexOptions.IgnoreCase
+            );
+            var startMatch = startPattern.Match(wikitext);
+            if (!startMatch.Success) return null;
+
+            int blockStart = startMatch.Index + startMatch.Length;
+
+            // Find the matching infocard/end
+            // We need to handle nested templates, so count depth
+            int depth = 1;
+            int pos = blockStart;
+            while (pos < wikitext.Length && depth > 0)
+            {
+                if (pos + 17 <= wikitext.Length && wikitext.Substring(pos, 17) == "{{infocard/start|")
+                    depth++;
+                else if (pos + 16 <= wikitext.Length && wikitext.Substring(pos, 16) == "{{infocard/end}}")
+                {
+                    depth--;
+                    if (depth == 0)
+                        return wikitext.Substring(blockStart, pos - blockStart);
+                }
+                pos++;
+            }
+
+            // Fallback: take everything from start to end of wikitext
+            return wikitext.Substring(blockStart);
+        }
+
+        /// <summary>
+        /// Parses categories and items from a class block's wikitext.
+        /// Uses depth tracking to properly handle nested box structures.
+        /// </summary>
+        private List<(string category, List<string> items)> ParseClassCategories(string block)
+        {
+            var result = new List<(string category, List<string> items)>();
+            var itemPattern = new Regex(@"\{\{item\|([^|}]+)");
+
+            // Sub-header titles to skip (these are nested inside real categories)
+            var skipTitles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Best", "Defensive", "Glass Cannon", "Minion Mixing"
+            };
+
+            // Find all box/start and box/end positions
+            var boxStartPattern = new Regex(@"\{\{infocard/box/start\|title=([^}|]+)");
+            var boxEndRegex = new Regex(@"\{\{infocard/box/end");
+
+            // Build a list of (position, isStart, title) events
+            var events = new List<(int pos, int len, bool isStart, string title)>();
+            foreach (Match m in boxStartPattern.Matches(block))
+                events.Add((m.Index, m.Length, true, m.Groups[1].Value.Trim()));
+            foreach (Match m in boxEndRegex.Matches(block))
+                events.Add((m.Index, m.Length, false, ""));
+            events.Sort((a, b) => a.pos.CompareTo(b.pos));
+
+            // Walk through events tracking depth to find top-level category ranges
+            int depth = 0;
+            string? currentCategory = null;
+            int categoryContentStart = 0;
+
+            foreach (var evt in events)
+            {
+                if (evt.isStart)
+                {
+                    depth++;
+                    if (depth == 1 && !skipTitles.Contains(evt.title))
+                    {
+                        // This is a new top-level category
+                        // First, flush the previous category if any
+                        if (currentCategory != null)
+                        {
+                            FlushCategory(result, currentCategory, block, categoryContentStart, evt.pos, itemPattern);
+                        }
+
+                        // Clean title
+                        string title = evt.title;
+                        if (title.Contains('|'))
+                            title = title.Split('|').Last();
+                        title = title.Replace("[[", "").Replace("]]", "").Trim();
+
+                        currentCategory = title;
+                        categoryContentStart = evt.pos + evt.len;
+                    }
+                }
+                else
+                {
+                    depth--;
+                    if (depth < 0) depth = 0;
+
+                    // When depth returns to 0, we've closed the current top-level box
+                    if (depth == 0 && currentCategory != null)
+                    {
+                        FlushCategory(result, currentCategory, block, categoryContentStart, evt.pos, itemPattern);
+                        currentCategory = null;
+                    }
+                }
+            }
+
+            // Flush any remaining category
+            if (currentCategory != null)
+            {
+                FlushCategory(result, currentCategory, block, categoryContentStart, block.Length, itemPattern);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Extracts items from a range of the block and adds them to the result list.
+        /// </summary>
+        private void FlushCategory(List<(string category, List<string> items)> result,
+            string title, string block, int start, int end, Regex itemPattern)
+        {
+            if (start >= end || start >= block.Length) return;
+
+            string content = block.Substring(start, Math.Min(end, block.Length) - start);
+            var items = new List<string>();
+
+            foreach (Match itemMatch in itemPattern.Matches(content))
+            {
+                string itemName = itemMatch.Groups[1].Value.Trim();
+                // Skip image/formatting params and plural markers
+                if (itemName.Contains("image=") || itemName.Contains(".png") || itemName.Contains(".gif"))
+                    continue;
+                if (!items.Contains(itemName))
+                    items.Add(itemName);
+            }
+
+            if (items.Count == 0) return;
+
+            // Merge with existing category of same name
+            var existing = result.FirstOrDefault(r => r.category == title);
+            if (existing.category != null)
+            {
+                foreach (var item in items)
+                    if (!existing.items.Contains(item))
+                        existing.items.Add(item);
+            }
+            else
+            {
+                result.Add((title, items));
+            }
+        }
+
+        #endregion
 
         protected override void Dispose(bool disposing)
         {
